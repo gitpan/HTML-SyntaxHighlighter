@@ -16,7 +16,7 @@ require Exporter;
 @EXPORT_OK = qw(
 );
 
-$VERSION = '0.01';
+$VERSION = '0.02';
 
 my %default_args = (
                     out_func => \*STDOUT,
@@ -125,13 +125,13 @@ sub start_document {
   $self->{silent} = $self->{header} ? 0 : 1;
   $self->{threshold} = 0;
 
-  $self->output( qq[<code>] );
+  $self->output( qq[<code>], 1 );
 }
 
 sub end_document {
   my $self = shift;
 
-  $self->output( qq[</code>] );
+  $self->output( qq[</code>], 1 );
 }
 
 sub start {
@@ -234,7 +234,9 @@ sub end {
   $output = gen_tag($type, "/$tagname", undef, undef,
                     ($error && $self->{debug}) ? { error => $error } : ()
                    );
-  $self->output( qq[$indent$output] );
+  # no line break after closing html tag
+  my $nobr = ($tagname eq 'html') ? 1 : 0;
+  $self->output( qq[$indent$output], $nobr );
 
   # store tagname for missing open tag checking
   $self->{last_block} = $tagname if $type eq 'B';
@@ -318,8 +320,9 @@ sub block_allowed {
 }
 
 sub output {
-  my ($self, $output) = @_;
-  $self->{out_func}->( "$output$self->{br}" ) unless $self->{silent};
+  my ($self, $output, $nobr ) = @_;
+  $output .= $self->{br} unless $nobr;
+  $self->{out_func}->( $output ) unless $self->{silent};
 }
 
 sub gen_tag {
@@ -457,19 +460,19 @@ The output function. Can be one of the following:
 
 The function is called whenever output is generated.
 
- $p->output( sub { $r->print( @_ ) } );
+ $p->out_func( sub { $r->print( @_ ) } );
 
 =item A filehandle globref
 
 Output is redirected to the filehandle.
 
- $p->output( \*DATAFILE );
+ $p->out_func( \*DATAFILE );
 
 =item A scalar ref
 
 Output is saved to the scalar variable.
 
- $p->output( \$data );
+ $p->out_func( \$data );
 
 =back
 
