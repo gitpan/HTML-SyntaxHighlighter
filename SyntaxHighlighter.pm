@@ -9,14 +9,14 @@ use HTML::Parser;
 
 require Exporter;
 
-@ISA = qw(HTML::Parser Exporter AutoLoader);
+@ISA = qw(HTML::Parser Exporter);
 # Items to export into callers namespace by default. Note: do not export
 # names by default without a very good reason. Use EXPORT_OK instead.
 # Do not simply export all your public functions/methods/constants.
 @EXPORT_OK = qw(
 );
 
-$VERSION = '0.02';
+$VERSION = '0.03';
 
 my %default_args = (
                     out_func => \*STDOUT,
@@ -24,7 +24,9 @@ my %default_args = (
                     default_type => 'html',
                     force_type => 0,
                     debug => 0,
-                    br => '<br />'
+                    br => '<br />',
+                    collapse_inline => 0,
+                    indent_level => 2
                    );
 
 # Preloaded methods go here.
@@ -110,6 +112,16 @@ sub br {
   $self->{br} = $br;
 }
 
+sub collapse_inline {
+  my ($self, $collapse_inline ) = @_;
+  $self->{collapse_inline} = $collapse_inline;
+}
+
+sub indent_level {
+  my ($self, $indent_level ) = @_;
+  $self->{indent_level} = $indent_level;
+}
+
 # HANDLERS
 
 sub start_document {
@@ -124,14 +136,15 @@ sub start_document {
   # header on: turn off output initially
   $self->{silent} = $self->{header} ? 0 : 1;
   $self->{threshold} = 0;
+  $self->{past_first_line} = 0;
 
-  $self->output( qq[<code>], 1 );
+  $self->{out_func}->( '<code>' );
 }
 
 sub end_document {
   my $self = shift;
 
-  $self->output( qq[</code>], 1 );
+  $self->{out_func}->( '</code>' );
 }
 
 sub start {
@@ -170,10 +183,9 @@ sub start {
         if( $close ne $self->{last_block} ) {
           pop @{$self->{stack}};
           $indent = $self->mk_indent();
-          # print "tagname => '$tagname', close => '$close', last_block -> '$self->{last_block}', stack => '@{$self->{stack}}'\n";
           if( $self->{debug} ) {
             $output = gen_tag('X', "/$close", undef, undef, { error => "Missing closing '$close' tag" } );
-            $self->output( qq[$indent<small>$output</small>] );
+            $self->output( $indent, "<small>$output</small>" );
           }
         }
       }
@@ -183,14 +195,34 @@ sub start {
   }
 
   if( ($type eq 'B') && !$self->block_allowed ) {
-    $error = "Block-level element '$tagname' within illegal inline element 'self->{stack}->[-1]'";
+    $error = "Block-level element '$tagname' within illegal inline element '$self->{stack}->[-1]'";
     $type = 'X';
   }
 
   $output = gen_tag($type, $tagname, $attr, $attrseq,
                     ($error && $self->{debug}) ? { error => $error } : ()
                     );
-  $self->output( qq[$indent$output] );
+
+  if( $self->{collapse_inline} ) {
+    if( ($type ne 'I') or is_element($tagname) or is_row($tagname) or $self->in_head() ) {
+      $self->{no_indent} = 0;
+    }
+  }
+
+  # header off: no line break before first line of body
+  my $nobr;
+  if( !$self->{header} && !$self->{past_first_line} && ($self->{stack}->[-2] eq 'body') ) {
+    $nobr = 1;
+    $self->{past_first_line} = 1;
+  }
+
+  $self->output( $indent, $output, $nobr );
+
+  if( $self->{collapse_inline} ) {
+    if( ($type eq 'I') and !is_script($tagname) ) {
+      $self->{no_indent} = 1;
+    }
+  }
 
   # header off: turn on output as we enter the body
   if( !$self->{header} && ($tagname eq 'body') ) {
@@ -234,9 +266,14 @@ sub end {
   $output = gen_tag($type, "/$tagname", undef, undef,
                     ($error && $self->{debug}) ? { error => $error } : ()
                    );
-  # no line break after closing html tag
-  my $nobr = ($tagname eq 'html') ? 1 : 0;
-  $self->output( qq[$indent$output], $nobr );
+
+  if( $self->{no_indent} ) {
+    if( ($type ne 'I') or is_row($tagname) ) {
+      $self->{no_indent} = 0;
+    }
+  }
+
+  $self->output( $indent, $output );
 
   # store tagname for missing open tag checking
   $self->{last_block} = $tagname if $type eq 'B';
@@ -252,17 +289,29 @@ sub text {
   if( $text =~ /\S/ ) {
     # different formatting for the contents of 'script' and 'style' tags
     my $parent = $self->{stack}->[-1];
-    if( ($parent eq 'script') ||
-        ($parent eq 'style') ) {
+    if( is_script($parent) ) {
+      $text =~ s/^\n//;
+      $text =~ s/\n\s*$//;
       $output = qq[<span class="S">$text</span>];
-      $self->output( qq[$output] );
+      $self->output( '', $output );
     } else {
       $text =~ s/\n//g;
       $text =~ s/^\s+//;
       $text =~ s/\s+$//;
 
+      # header off: no line break before first line of body
+      my $nobr;
+      if( !$self->{header} && !$self->{past_first_line} && ($self->{stack}->[-1] eq 'body') ) {
+        $nobr = 1;
+        $self->{past_first_line} = 1;
+      }
+
       $output = qq[<span class="T">$text</span>];
-      $self->output( qq[$indent$output] );
+      $self->output( $indent, $output, $nobr );
+
+      if( $self->{collapse_inline} ) {
+        $self->{no_indent} = 1;
+      }
     }
   }
 }
@@ -274,7 +323,7 @@ sub comment {
 
   my $text = encode_entities($origtext);
   $output = qq[<span class="C">$text</span>];
-  $self->output( qq[$indent$output] );
+  $self->output( $indent, $output );
 }
 
 sub declaration {
@@ -286,7 +335,7 @@ sub declaration {
   map { s!^"(.*)"$!"<var>$1</var>"! } @tokens;
   $output .= join ' ', @tokens;
   $output .= qq[&gt;</span>];
-  $self->output( $output );
+  $self->output( '', $output, 1 );
 
   unless( $self->{force_type} ) {
     if( my $identifier = $tokens[3] ){
@@ -302,17 +351,62 @@ sub declaration {
 
 sub block_allowed {
   my $self = shift;
-  my $type = $self->{stack}->[-1];
-  if( (sel_type( $type ) ne 'I' ) ||
-      ($type eq 'li') ||
-      ($type eq 'dd') ||
-      ($type eq 'td') ||
-      ($type eq 'th') ||
-      ($type eq 'object') ||
-      ($type eq 'ins') ||
-      ($type eq 'del') ||
-      ($type eq 'ins') ||
-      ($type eq 'button') ) {
+  my $tag = $self->{stack}->[-1];
+  if( (sel_type( $tag ) ne 'I' ) ||
+      ($tag eq 'li') ||
+      ($tag eq 'dd') ||
+      ($tag eq 'td') ||
+      ($tag eq 'th') ||
+      ($tag eq 'object') ||
+      ($tag eq 'ins') ||
+      ($tag eq 'del') ||
+      ($tag eq 'ins') ||
+      ($tag eq 'button') ) {
+    return 1;
+  } else {
+    return 0;
+  }
+}
+
+sub is_element {
+  my $tag = shift;
+  if( ($tag eq 'li') ||
+      ($tag eq 'dt') ||
+      ($tag eq 'dd') ||
+      ($tag eq 'td') ||
+      ($tag eq 'th') ) {
+    return 1;
+  } else {
+    return 0;
+  }
+}
+
+sub is_row {
+  my $tag = shift;
+  if( ($tag eq 'tr') ||
+      ($tag eq 'thead') ||
+      ($tag eq 'tbody') ||
+      ($tag eq 'tfoot') ) {
+    return 1;
+  } else {
+    return 0;
+  }
+}
+
+sub is_script {
+  my $tag = shift;
+  if( ($tag eq 'script') ||
+      ($tag eq 'style') ) {
+    return 1;
+  } else {
+    return 0;
+  }
+}
+
+sub in_head {
+  my $self = shift;
+  my $doc_level = $self->{stack}[1];
+  if( ($doc_level eq 'head') ) {
     return 1;
   } else {
     return 0;
@@ -320,8 +414,11 @@ sub block_allowed {
 }
 
 sub output {
-  my ($self, $output, $nobr ) = @_;
-  $output .= $self->{br} unless $nobr;
+  my ($self, $indent, $output, $nobr ) = @_;
+  if( !$self->{no_indent} ) {
+    $output = $indent . $output;
+    $output = $self->{br} . $output unless $nobr;
+  }
   $self->{out_func}->( $output ) unless $self->{silent};
 }
 
@@ -376,7 +473,7 @@ sub sel_type {
 sub mk_indent {
   my $self = shift;
   my $i = scalar( @{$self->{stack}} ) - $self->{threshold};
-  return '&nbsp' x ($i * 2);
+  return '&nbsp' x ($i * $self->{indent_level});
 }
 
 # Autoload methods go after =cut, and are processed by the autosplit program.
@@ -477,6 +574,15 @@ Output is saved to the scalar variable.
 =back
 
 The default value is '\*STDOUT'.
+
+=item C<collapse_inline>
+
+If this option is turned on, then inline tags and text will be
+collapsed onto a single line; only block-level elements and table rows
+being indented as normal.
+This should probably only be used on small html snippets, since it has
+not been extensively tested against large ones, and I'd be surprised
+if it stood up well to handling complex or less-than-perfect code.
 
 =item C<header>
 
